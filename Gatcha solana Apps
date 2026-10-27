@@ -1,0 +1,123 @@
+
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::hash::hashv;
+
+declare_id!("11111111111111111111111111111111");
+
+#[program]
+pub mod gacha_card {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+        let player = &mut ctx.accounts.player;
+
+        player.owner = ctx.accounts.user.key();
+        player.pulls = 0;
+        player.last_card = 0;
+        player.last_rarity = 0;
+        player.bump = ctx.bumps.player;
+
+        msg!("Gacha player account created!");
+        Ok(())
+    }
+
+    pub fn pull_card(ctx: Context<PullCard>) -> Result<()> {
+        let clock = Clock::get()?;
+        let player = &mut ctx.accounts.player;
+
+        // Demo pseudo-randomness only.
+        // NOT safe for valuable rewards in production.
+        let timestamp = clock.unix_timestamp.to_le_bytes();
+        let slot = clock.slot.to_le_bytes();
+        let pulls = player.pulls.to_le_bytes();
+        let owner = player.owner.to_bytes();
+
+        let hash = hashv(&[
+            &timestamp,
+            &slot,
+            &pulls,
+            &owner,
+        ]);
+
+        let roll = u64::from_le_bytes(
+            hash.to_bytes()[0..8].try_into().unwrap()
+        ) % 100;
+
+        // Rarity:
+        // Common: 70%
+        // Rare: 20%
+        // Epic: 9%
+        // Legendary: 1%
+        let (card_id, rarity) = match roll {
+            0 => (4, 3),       // Legendary
+            1..=9 => (3, 2),  // Epic
+            10..=29 => (2, 1),// Rare
+            _ => (1, 0),      // Common
+        };
+
+        player.pulls = player.pulls
+            .checked_add(1)
+            .ok_or(GachaError::Overflow)?;
+
+        player.last_card = card_id;
+        player.last_rarity = rarity;
+
+        msg!("Card ID: {}", card_id);
+        msg!("Rarity: {}", rarity);
+        msg!("Total pulls: {}", player.pulls);
+
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Initialize<'info> {
+    #[account(
+        init,
+        payer = user,
+        space = 8 + 32 + 8 + 1 + 1 + 1,
+        seeds = [b"player", user.key().as_ref()],
+        bump
+    )]
+    pub player: Account<'info, PlayerAccount>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct PullCard<'info> {
+    #[account(
+        mut,
+        seeds = [b"player", user.key().as_ref()],
+        bump = player.bump,
+        has_one = owner_check @ GachaError::Unauthorized
+    )]
+    pub player: Account<'info, PlayerAccount>,
+
+    // Must match the owner stored in the player account.
+    pub user: Signer<'info>,
+
+    /// CHECK: Address is checked against the signed user below.
+    #[account(address = user.key())]
+    pub owner_check: AccountInfo<'info>,
+}
+
+#[account]
+pub struct PlayerAccount {
+    pub owner: Pubkey,
+    pub pulls: u64,
+    pub last_card: u8,
+    pub last_rarity: u8,
+    pub bump: u8,
+}
+
+#[error_code]
+pub enum GachaError {
+    #[msg("Unauthorized player")]
+    Unauthorized,
+    #[msg("Counter overflow")]
+    Overflow,
+}
